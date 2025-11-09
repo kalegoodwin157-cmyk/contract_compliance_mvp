@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Contract Compliance MVP — Breach Scanner (PDF-enabled)</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;max-width:960px;margin:24px auto;padding:18px;color:#111}
+  header{display:flex;align-items:center;gap:12px}
+  h1{margin:0;font-size:1.4rem}
+  .panel{border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:12px;background:#fafafa}
+  label{display:block;margin:8px 0 4px;font-weight:600}
+  textarea{width:100%;height:200px;padding:10px;border:1px solid #ccc;border-radius:6px;font-family:monospace;white-space:pre-wrap}
+  button{background:#0b63d5;color:white;padding:10px 14px;border-radius:8px;border:0;cursor:pointer;font-weight:600}
+  button[disabled]{opacity:0.5;cursor:not-allowed}
+  .grid{display:grid;grid-template-columns:1fr 320px;gap:16px}
+  .meta{font-size:0.95rem}
+  ul{padding-left:18px}
+  .tag{display:inline-block;background:#eef;margin:4px 6px;padding:6px;border-radius:6px;font-weight:600}
+  .danger{background:#ffe8e8;border:1px solid #f3bcbc}
+  footer{font-size:0.85rem;color:#444;margin-top:18px}
+  .download{margin-top:12px}
+  .hard-check{background:#fff7e6;padding:10px;border-radius:6px;border:1px solid #ffe1b3}
+</style>
+<!-- Load PDF.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+<header><h1>Contract Compliance MVP — Breach Scanner (PDF-enabled)</h1></header>
+
+<p>This version supports both plain-text and PDF contracts. It extracts key facts, identifies breach-related clauses, and generates a report including the file name. It runs entirely in your browser — no server uploads.</p>
+
+<div class="panel">
+  <div class="grid">
+    <div>
+      <label for="contractText">Contract text (paste here or upload .txt/.pdf)</label>
+      <textarea id="contractText" placeholder="Paste contract text here..."></textarea>
+      <div style="margin-top:8px">
+        <input type="file" id="fileInput" accept=".txt,.pdf"/>&nbsp;<button id="loadSample">Load sample</button>
+      </div>
+
+      <div class="hard-check" style="margin-top:12px">
+        <strong>Pre-analysis steps — required</strong>
+        <p>To prevent bypassing key checks, you must complete the three confirmations below before analysis.</p>
+        <label><input type="checkbox" id="chk1"> I confirm I have authority to analyze this contract.</label>
+        <label><input type="checkbox" id="chk2"> I have removed confidential attachments or will not share them.</label>
+        <label><input type="checkbox" id="chk3"> I understand this tool provides heuristics only, not legal advice.</label>
+      </div>
+
+      <div style="margin-top:12px">
+        <button id="analyzeBtn" disabled>Analyze contract</button>
+        <button id="clearBtn">Clear</button>
+      </div>
+
+      <div class="download">
+        <button id="downloadReport" disabled>Download summary report (.txt)</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel meta">
+        <strong>Extracted facts</strong>
+        <div id="facts"><p><em>No analysis run yet.</em></p></div>
+      </div>
+
+      <div class="panel danger" style="margin-top:12px">
+        <strong>Key risks — likely breach types</strong>
+        <div id="risks"><p><em>Run analysis to populate.</em></p></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top:14px">
+  <strong>Suggested mitigation & next steps</strong>
+  <div id="nextSteps"><p><em>Run analysis.</em></p></div>
+</div>
+
+<footer>
+  <p><strong>Notes:</strong> PDF extraction uses PDF.js and works best on selectable text (not scanned images). This is a prototype — not legal advice.</p>
+</footer>
+
+<script>
+let uploadedFileName = '';
+
+// Basic regex helpers
+const dateRegex = /\\b(?:\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{1,2},?\\s+\\d{4}|\\b\\d{4}-\\d{2}-\\d{2}\\b)\\b/gi;
+const moneyRegex = /\\$\\s?\\d{1,3}(?:[\\,\\d]{0,})?(?:\\.\\d{1,2})?/g;
+const partyRegexes = [
+  /This\\s+Agreement\\s+is\\s+(?:made\\s+)?between\\s+([\\w\\s,.'-]{2,120}?)\\s+and\\s+([\\w\\s,.'-]{2,120}?)\\b/i,
+  /Between:\\s*([\\w\\s,.'-]{2,120}?)\\s*and\\s*([\\w\\s,.'-]{2,120}?)\\b/i
+];
+
+const breachKeywords = [
+  {k:'payment', words:['payment','payable','default','late payment','overdue','non-payment']},
+  {k:'delivery', words:['deliver','delivery','delay','fail to deliver','non-delivery','late delivery']},
+  {k:'confidentiality', words:['confidential','disclos','non-disclosure','nda','privacy breach']},
+  {k:'warranty', words:['warrant','warranty','defect','repair','replace','service levels']},
+  {k:'termination', words:['terminate','termination','rescission','breach of this agreement','material breach']},
+  {k:'performance', words:['performance','satisfactory','service level','sla','performance standard']},
+  {k:'intellectual property', words:['intellectual property','ip','infring','licence','license']},
+  {k:'compliance', words:['comply','compliance','law','regulation','statutory']},
+  {k:'data protection', words:['personal data','data protection','gdpr','pipa','ccpa','privacy']},
+  {k:'indemnity', words:['indemnif','hold harmless','liabilit','indemnity']},
+  {k:'force majeure', words:['force majeure','act of god','unforeseeable']}
+];
+
+function extractDates(t){return Array.from(t.matchAll(dateRegex),m=>m[0]);}
+function extractMoney(t){return Array.from(t.matchAll(moneyRegex),m=>m[0]);}
+function extractParties(t){for(const r of partyRegexes){const m=t.match(r);if(m)return [m[1],m[2]];}return [];}
+function findClauseMatches(t){const lower=t.toLowerCase();return breachKeywords.filter(b=>b.words.some(w=>lower.includes(w))).map(b=>({type:b.k}));}
+function summarizeBreachScenarios(m){if(!m.length)return['No direct breach keywords found — manual review suggested.'];const d={payment:'Missed or late payments — default risk.',delivery:'Delayed delivery — potential material breach.',confidentiality:'Disclosure of confidential info — serious breach.',warranty:'Failure to meet warranty — possible claim.',termination:'Material breach may trigger termination.',performance:'Substandard performance — possible SLA breach.','intellectual property':'IP misuse — infringement risk.',compliance:'Regulatory non-compliance.', 'data protection':'Privacy/data breach — reporting required.',indemnity:'Indemnity triggered by breach.', 'force majeure':'Force majeure may excuse performance.'};return m.map(x=>d[x.type]);}
+function proposeNextSteps(dates,parties,money){const steps=[];steps.push(dates.length?'Calendar key dates: '+dates.join('; '):'Add key dates manually.');steps.push(parties.length?'Confirm parties: '+parties.join(' | '):'Review party names/signatories.');steps.push(money.length?'Record amounts: '+money.join('; '):'No amounts detected — verify schedule.');steps.push('Preserve evidence and follow notice/cure provisions.');steps.push('Consult counsel before terminating or claiming damages.');return steps;}
+
+// PDF or text file loader
+document.getElementById('fileInput').addEventListener('change',async ev=>{
+  const file=ev.target.files[0]; if(!file)return;
+  uploadedFileName=file.name;
+  const textarea=document.getElementById('contractText');
+  if(file.name.toLowerCase().endsWith('.txt')){
+    const text=await file.text(); textarea.value=text;
+  }else if(file.name.toLowerCase().endsWith('.pdf')){
+    const arrayBuffer=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+    let fullText='';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page=await pdf.getPage(i);
+      const content=await page.getTextContent();
+      const strings=content.items.map(it=>it.str);
+      fullText+=strings.join(' ')+'\\n';
+    }
+    textarea.value=fullText.trim();
+    alert('Extracted text from '+pdf.numPages+' PDF pages.');
+  }
+});
+
+// Checkbox gating
+const aBtn=document.getElementById('analyzeBtn');
+[chk1,chk2,chk3].forEach(c=>c.addEventListener('change',()=>{aBtn.disabled=!(chk1.checked&&chk2.checked&&chk3.checked);}));
+
+document.getElementById('loadSample').addEventListener('click',()=>{
+  document.getElementById('contractText').value=`This Agreement is made between Alpha Widgets Inc. ("Alpha") and Beta Services Ltd. ("Beta") on June 1, 2025.
+Alpha agrees to deliver 1,000 widgets by September 15, 2025. Payment of $50,000 is due within 30 days of invoice. Confidential information must be protected. Failure to deliver may constitute breach.`;
+});
+
+document.getElementById('clearBtn').addEventListener('click',()=>{
+  document.getElementById('contractText').value='';document.getElementById('facts').innerHTML='<p><em>No analysis run yet.</em></p>';document.getElementById('risks').innerHTML='<p><em>Run analysis to populate.</em></p>';document.getElementById('nextSteps').innerHTML='<p><em>Run analysis.</em></p>';document.getElementById('downloadReport').disabled=true;uploadedFileName='';
+});
+
+aBtn.addEventListener('click',()=>{
+  const t=document.getElementById('contractText').value;if(t.trim().length<20){alert('Please provide contract text.');return;}
+  const dates=extractDates(t),money=extractMoney(t),parties=extractParties(t),matches=findClauseMatches(t);
+  document.getElementById('facts').innerHTML=`<ul>
+<li><strong>File:</strong> ${uploadedFileName||'<em>None</em>'}</li>
+<li><strong>Dates:</strong> ${dates.join(', ')||'<em>None</em>'}</li>
+<li><strong>Parties:</strong> ${parties.join(' | ')||'<em>Not detected</em>'}</li>
+<li><strong>Amounts:</strong> ${money.join(', ')||'<em>None</em>'}</li>
+<li><strong>Breach clauses:</strong> ${matches.map(m=>m.type).join(', ')||'<em>None</em>'}</li>
+</ul>`;
+  const risks=summarizeBreachScenarios(matches);
+  document.getElementById('risks').innerHTML='<ul>'+risks.map(r=>'<li>'+r+'</li>').join('')+'</ul>';
+  const steps=proposeNextSteps(dates,parties,money);
+  document.getElementById('nextSteps').innerHTML='<ol>'+steps.map(s=>'<li>'+s+'</li>').join('')+'</ol>';
+  const report=buildReport(t,dates,parties,money,matches,risks,steps);
+  const dlBtn=document.getElementById('downloadReport');
+  dlBtn.onclick=()=>downloadTextFile(report,(uploadedFileName||'contract')+'_scan_report.txt');
+  dlBtn.disabled=false;
+});
+
+function buildReport(text,dates,parties,money,matches,risks,steps){
+  let lines=[];
+  lines.push('Contract Compliance MVP — PDF-enabled Scan Report');
+  lines.push('File: '+(uploadedFileName||'N/A'));
+  lines.push('Generated: '+new Date().toISOString());
+  lines.push('--- Facts ---');
+  lines.push('Dates: '+(dates.join('; ')||'None'));
+  lines.push('Parties: '+(parties.join(' | ')||'None'));
+  lines.push('Amounts: '+(money.join('; ')||'None'));
+  lines.push('Clauses: '+(matches.map(m=>m.type).join(', ')||'None'));
+  lines.push('--- Risks ---');
+  for(const r of risks)lines.push('- '+r);
+  lines.push('--- Next Steps ---');
+  for(const s of steps)lines.push('- '+s);
+  lines.push('--- Contract excerpt ---');
+  lines.push(text.slice(0,4000));
+  return lines.join('\\n');
+}
+function downloadTextFile(t,f){const blob=new Blob([t],{type:'text/plain'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=f;a.click();URL.revokeObjectURL(url);}
+</script>
+</body>
+</html>
